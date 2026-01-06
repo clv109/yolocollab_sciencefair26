@@ -9,7 +9,6 @@ from collections import deque
 import cv2
 import numpy as np
 from ultralytics import YOLO
-# Added 'request' to allow Flask to receive the capacity update
 from flask import Flask, render_template, jsonify, Response, request
 
 
@@ -26,12 +25,12 @@ try:
    
     lcd.cursor_pos = (1, 0)
     lcd.write_string("Starting...")
-    print("✅ LCD Display Connected!")
+    print("LCD Display Connected!")
 except Exception as e:
     print(f"LCD Display not found. Running without it.")
     lcd = None
 
-# --- GLOBAL VARIABLES ---
+# global variables
 TOTAL_CAR_COUNT = 0
 TOTAL_CAPACITY = 10  # This will be updated by the website
 outputFrame = None 
