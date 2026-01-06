@@ -12,25 +12,23 @@ from ultralytics import YOLO
 # Added 'request' to allow Flask to receive the capacity update
 from flask import Flask, render_template, jsonify, Response, request
 
-# --- HARDWARE SETUP (I2C LCD) ---
+
 lcd = None
 try:
     from RPLCD.i2c import CharLCD
-    # Standard address is usually 0x27. Use 'i2cdetect -y 1' on Pi to check.
+    
     lcd = CharLCD('PCF8574', 0x27)
     lcd.clear()
     
-    # Write Line 1
     lcd.cursor_pos = (0, 0)
     lcd.write_string("AI Parking")
     
-    # Write Line 2
+   
     lcd.cursor_pos = (1, 0)
     lcd.write_string("Starting...")
-    
     print("✅ LCD Display Connected!")
 except Exception as e:
-    print(f"⚠️ LCD Display not found. Running without it.")
+    print(f"LCD Display not found. Running without it.")
     lcd = None
 
 # --- GLOBAL VARIABLES ---
@@ -54,19 +52,19 @@ def get_data():
         'status': 'Active'
     })
 
-# --- NEW ROUTE TO UPDATE CAPACITY ---
+#route to update capacity
 @app.route('/set_capacity', methods=['POST'])
 def set_capacity():
     global TOTAL_CAPACITY
     
-    # Get JSON data sent from the website
+    #grab json data from website
     data = request.get_json()
     
     if data and 'capacity' in data:
         try:
             new_cap = int(data['capacity'])
             TOTAL_CAPACITY = new_cap
-            print(f"🔄 Capacity updated via Web to: {TOTAL_CAPACITY}")
+            print(f"Capacity updated via Web to: {TOTAL_CAPACITY}")
             return jsonify({'status': 'success', 'new_capacity': TOTAL_CAPACITY})
         except ValueError:
             return jsonify({'status': 'error', 'message': 'Invalid number'}), 400
@@ -74,7 +72,7 @@ def set_capacity():
     return jsonify({'status': 'error', 'message': 'No capacity provided'}), 400
 
 def generate():
-    """Video streaming generator function."""
+    """ Video streaming generator function."""
     global outputFrame, lock
     while True:
         with lock:
@@ -92,12 +90,11 @@ def generate():
 def video_feed():
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# --- AI LOGIC ---
+# ai model logic
 def run_ai_logic(args):
     global TOTAL_CAR_COUNT, outputFrame, lock, lcd
-    # We access the global TOTAL_CAPACITY in this thread
-    
-    # Args are passed in from main now
+    # access total capacity in this thread
+
     model_path = args.model
     img_source = args.source
     min_thresh = float(args.thresh)
@@ -116,8 +113,7 @@ def run_ai_logic(args):
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to load YOLO model. {e}")
         return
-
-    # --- SOURCE DETECTION ---
+        
     source_type = 'unknown'
     usb_idx = 0
     img_ext_list = ['.jpg','.JPG','.jpeg','.png','.PNG','.bmp']
@@ -136,7 +132,7 @@ def run_ai_logic(args):
         usb_idx = int(img_source)
     elif 'picamera' in img_source: source_type = 'picamera'
     
-    # --- CAMERA SETUP ---
+    # camera set up 
     cap = None
     if source_type in ['video', 'usb']:
         cap_arg = img_source if source_type == 'video' else usb_idx
@@ -201,7 +197,7 @@ def run_ai_logic(args):
         else:
             TOTAL_CAR_COUNT = current_frame_count
 
-        # --- UPDATE LCD DISPLAY ---
+        # update lcd display with new information
         if lcd:
             free_spaces = max(0, TOTAL_CAPACITY - TOTAL_CAR_COUNT)
             try:
@@ -225,7 +221,7 @@ def run_ai_logic(args):
             label = f'{detections[i].conf.item():.2f}'
             cv2.putText(frame, label, (xyxy[0], xyxy[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        # Show Count / Global Capacity on video
+        # show global capacity on the live video
         cv2.putText(frame, f'COUNT: {TOTAL_CAR_COUNT} / {TOTAL_CAPACITY}', (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
         
         with lock:
@@ -241,7 +237,7 @@ def run_ai_logic(args):
     cv2.destroyAllWindows()
     os._exit(0)
 
-# --- MAIN EXECUTION ---
+# main execution(arguments) for code to run
 if __name__ == '__main__':
     # 1. PARSE ARGUMENTS
     parser = argparse.ArgumentParser()
@@ -259,15 +255,15 @@ if __name__ == '__main__':
 
     # --- DEBUGGING ARGUMENTS ---
     if len(unknown) > 0:
-        print(f"⚠️  WARNING: IGNORED UNKNOWN ARGUMENTS: {unknown}")
-        print("    (Check your dashes! Use standard '--' dashes)")
+        print(f" WARNING: IGNORED UNKNOWN ARGUMENTS: {unknown}")
+        print("   (Check your dashes! Use standard '--' dashes)")
 
-    # 2. SET GLOBAL CAPACITY
+    # setting global capacity
     TOTAL_CAPACITY = args.capacity
     print(f"🅿️  PARKING CAPACITY SET TO: {TOTAL_CAPACITY}")
     print(f"----------------------------------------")
 
-    # 3. START THREADS
+    # start threads
     ai_thread = threading.Thread(target=run_ai_logic, args=(args,))
     ai_thread.start()
     
