@@ -1,0 +1,254 @@
+import os
+import cv2
+import albumentations as A
+from pathlib import Path
+import shutil
+
+# Define paths - CHANGE THIS to the folder you want to augment
+TARGET_FOLDER = "RawImagesandLabelsDec20"  # Change this to your folder name
+IMAGES_SUBFOLDER = "images"  # Change if your images folder has a different name
+LABELS_SUBFOLDER = "labels"  # Change if your labels folder has a different name
+
+workspace_root = Path.cwd()
+
+# Check multiple possible locations for the target folder
+possible_locations = [
+    workspace_root / TARGET_FOLDER,
+    workspace_root.parent / TARGET_FOLDER,
+    Path.home() / "Downloads" / TARGET_FOLDER,
+    Path.home() / "Documents" / TARGET_FOLDER,
+]
+
+base_dir = None
+for location in possible_locations:
+    if location.exists() and (location / IMAGES_SUBFOLDER).exists() and (location / LABELS_SUBFOLDER).exists():
+        base_dir = location
+        print(f"Found images and labels in: {base_dir.absolute()}")
+        break
+
+if base_dir is None:
+    print(f"Could not find '{TARGET_FOLDER}' with {IMAGES_SUBFOLDER} and {LABELS_SUBFOLDER} directories!")
+    print(f"\nSearched in:")
+    for loc in possible_locations:
+        print(f"  - {loc}")
+    
+    # Show what's actually in the target folder if it exists
+    for location in possible_locations:
+        if location.exists():
+            print(f"\nContents of {location}:")
+            for item in location.iterdir():
+                print(f"  - {item.name}")
+            break
+    
+    print(f"\nPlease update IMAGES_SUBFOLDER and LABELS_SUBFOLDER in the script to match your actual folder names.")
+    exit(1)
+
+images_dir = base_dir / IMAGES_SUBFOLDER
+labels_dir = base_dir / LABELS_SUBFOLDER
+
+# Create output directories
+output_images_dir = base_dir / "augmented_images"
+output_labels_dir = base_dir / "augmented_labels"
+output_images_dir.mkdir(parents=True, exist_ok=True)
+output_labels_dir.mkdir(parents=True, exist_ok=True)
+
+# Define multiple augmentation pipelines for variety
+# Pipeline 1: Lighting and weather variations (most important for parking detection)
+transform_lighting = A.Compose([
+    A.OneOf([
+        A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
+        A.RandomGamma(gamma_limit=(70, 130), p=1.0),
+        A.CLAHE(clip_limit=4.0, p=1.0),
+    ], p=0.9),
+    A.OneOf([
+        A.RandomShadow(shadow_roi=(0, 0, 1, 1), num_shadows_limit=(1, 2), p=1.0),
+        A.RandomRain(brightness_coefficient=0.9, drop_length=20, blur_value=3, p=1.0),
+    ], p=0.3),
+    A.HorizontalFlip(p=0.5),
+], bbox_params=A.BboxParams(format='yolo', label_fields=['class_labels'], min_visibility=0.3))
+
+# Pipeline 2: Geometric transformations
+transform_geometric = A.Compose([
+    A.OneOf([
+        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.15, rotate_limit=10, p=1.0),
+        A.Perspective(scale=(0.05, 0.1), p=1.0),
+        A.Affine(scale=(0.9, 1.1), translate_percent=0.1, rotate=(-10, 10), shear=(-5, 5), p=1.0),
+    ], p=0.8),
+    A.HorizontalFlip(p=0.5),
+], bbox_params=A.BboxParams(format='yolo', label_fields=['class_labels'], min_visibility=0.3))
+
+# Pipeline 3: Image quality variations
+transform_quality = A.Compose([
+    A.OneOf([
+        A.GaussNoise(p=1.0),
+        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+        A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=1.0),
+    ], p=0.5),
+    A.OneOf([
+        A.MotionBlur(blur_limit=5, p=1.0),
+        A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+        A.Defocus(radius=(2, 4), alias_blur=(0.1, 0.3), p=1.0),
+    ], p=0.4),
+    A.OneOf([
+        A.Sharpen(alpha=(0.2, 0.5), lightness=(0.5, 1.0), p=1.0),
+        A.ImageCompression(quality_lower=60, quality_upper=90, compression_type="jpeg", p=1.0),
+    ], p=0.3),
+], bbox_params=A.BboxParams(format='yolo', label_fields=['class_labels'], min_visibility=0.3))
+
+# Pipeline 4: Color variations
+transform_color = A.Compose([
+    A.OneOf([
+        A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=1.0),
+        A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=1.0),
+        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=1.0),
+    ], p=0.8),
+    A.HorizontalFlip(p=0.5),
+], bbox_params=A.BboxParams(format='yolo', label_fields=['class_labels'], min_visibility=0.3))
+
+# Store all pipelines
+augmentation_pipelines = [
+    transform_lighting,
+    transform_geometric, 
+    transform_quality,
+    transform_color
+]
+
+# Number of augmentations per image (cycles through pipelines)
+num_augmentations = 9  # Total images = x * 6 (5 augmented + 1 original)
+
+def read_yolo_labels(label_path):
+    """Read YOLO format labels from file and validate/clip coordinates"""
+    bboxes = []
+    class_labels = []
+    
+    if not os.path.exists(label_path):
+        return bboxes, class_labels
+    
+    with open(label_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 5:
+                class_id = int(parts[0])
+                # Read bbox coordinates
+                x_center, y_center, width, height = [float(x) for x in parts[1:5]]
+                
+                # Clip coordinates to valid range [0.0, 1.0]
+                x_center = max(0.0, min(1.0, x_center))
+                y_center = max(0.0, min(1.0, y_center))
+                width = max(0.0, min(1.0, width))
+                height = max(0.0, min(1.0, height))
+                
+                # Ensure bbox doesn't go outside image bounds
+                half_w = width / 2
+                half_h = height / 2
+                x_center = max(half_w, min(1.0 - half_w, x_center))
+                y_center = max(half_h, min(1.0 - half_h, y_center))
+                
+                bbox = [x_center, y_center, width, height]
+                class_labels.append(class_id)
+                bboxes.append(bbox)
+    
+    return bboxes, class_labels
+
+def write_yolo_labels(label_path, bboxes, class_labels):
+    """Write YOLO format labels to file"""
+    with open(label_path, 'w') as f:
+        for class_id, bbox in zip(class_labels, bboxes):
+            line = f"{class_id} {' '.join([str(x) for x in bbox])}\n"
+            f.write(line)
+
+def augment_dataset():
+    """Augment all images and labels in the dataset"""
+    # Debug: Check if directories exist
+    print(f"Looking for images in: {images_dir.absolute()}")
+    print(f"Images directory exists: {images_dir.exists()}")
+    
+    if images_dir.exists():
+        all_files = list(images_dir.iterdir())
+        print(f"Files in images directory: {[f.name for f in all_files[:10]]}")  # Show first 10
+    
+    # Try multiple image extensions
+    image_files = (list(images_dir.glob("*.jpg")) + 
+                   list(images_dir.glob("*.jpeg")) + 
+                   list(images_dir.glob("*.png")) +
+                   list(images_dir.glob("*.JPG")) +
+                   list(images_dir.glob("*.JPEG")) +
+                   list(images_dir.glob("*.PNG")))
+    
+    print(f"Found {len(image_files)} images to augment")
+    
+    successful_augs = 0
+    failed_augs = 0
+    
+    for img_path in image_files:
+        # Read image
+        image = cv2.imread(str(img_path))
+        if image is None:
+            print(f"Could not read {img_path}")
+            continue
+        
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Get corresponding label file
+        label_path = labels_dir / f"{img_path.stem}.txt"
+        bboxes, class_labels = read_yolo_labels(label_path)
+        
+        # Copy original files
+        shutil.copy(img_path, output_images_dir / img_path.name)
+        if label_path.exists():
+            shutil.copy(label_path, output_labels_dir / label_path.name)
+        
+        # Generate augmentations - cycles through different pipelines
+        for i in range(num_augmentations):
+            try:
+                # Select a pipeline based on iteration (cycles through all 4 pipelines)
+                transform = augmentation_pipelines[i % len(augmentation_pipelines)]
+                
+                if len(bboxes) > 0:
+                    # Apply augmentation with bounding boxes
+                    augmented = transform(image=image, bboxes=bboxes, class_labels=class_labels)
+                    aug_image = augmented['image']
+                    aug_bboxes = augmented['bboxes']
+                    aug_class_labels = augmented['class_labels']
+                else:
+                    # Apply augmentation without bounding boxes
+                    augmented = transform(image=image)
+                    aug_image = augmented['image']
+                    aug_bboxes = []
+                    aug_class_labels = []
+                
+                # Save augmented image
+                aug_img_name = f"{img_path.stem}_aug_{i}{img_path.suffix}"
+                aug_img_path = output_images_dir / aug_img_name
+                cv2.imwrite(str(aug_img_path), cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR))
+                
+                # Save augmented labels
+                aug_label_name = f"{img_path.stem}_aug_{i}.txt"
+                aug_label_path = output_labels_dir / aug_label_name
+                write_yolo_labels(aug_label_path, aug_bboxes, aug_class_labels)
+                
+                successful_augs += 1
+                
+            except Exception as e:
+                failed_augs += 1
+                if failed_augs <= 10:  # Only print first 10 errors to avoid spam
+                    print(f"Error augmenting {img_path.name} (iteration {i}): {e}")
+                continue
+        
+        print(f"Processed: {img_path.name}")
+    
+    
+    total_images = len(list(output_images_dir.glob('*.jpg'))) + len(list(output_images_dir.glob('*.png')))
+    print(f"\nAugmentation complete!")
+    print(f"Original images: {len(image_files)}")
+    print(f"Successful augmentations: {successful_augs}")
+    print(f"Failed augmentations: {failed_augs}")
+    print(f"Expected total: {len(image_files) * (num_augmentations + 1)}")
+    print(f"Actual total images: {total_images}")
+    
+    if failed_augs > 0:
+        print(f"\n⚠️ Warning: {failed_augs} augmentations failed!")
+        print("Common causes: bounding boxes outside valid range, aggressive transformations")
+
+if __name__ == "__main__":
+    augment_dataset()
